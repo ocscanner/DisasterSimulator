@@ -218,6 +218,12 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;background:var(--gree
 .batch-results th{color:var(--dim);text-transform:uppercase;font-size:8.5px;letter-spacing:1px;}
 .batch-rank{display:inline-block;padding:1px 6px;border:1px solid;font-size:9px;}
 
+/* RISK WEIGHT SELECTOR */
+.weight-bar{display:flex;gap:3px;margin-top:6px;flex-wrap:wrap;}
+.wt-btn{flex:1;min-width:44px;background:none;border:1px solid var(--border2);color:var(--dim);font-family:var(--mono);font-size:8.5px;letter-spacing:.5px;padding:5px 3px;cursor:pointer;transition:all .15s;}
+.wt-btn:hover{border-color:var(--dim);color:var(--text);}
+.wt-btn.on{border-color:var(--cyan);color:var(--cyan);background:rgba(0,255,221,.08);}
+
 .leaflet-container{background:#151d27;}
 .leaflet-control-zoom{display:none;}
 .leaflet-control-attribution{background:rgba(16,22,30,.7)!important;color:var(--muted)!important;font-size:9px!important;border:none!important;}
@@ -384,6 +390,16 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;background:var(--gree
       <div class="sl-head"><span class="sl-name">Proximity Radius (km)</span><span class="sl-val" id="assessRadV">10 km</span></div>
       <input type="range" id="assessRad" min="2" max="40" step="1" value="10" oninput="updateSim()">
     </div>
+    <div class="info-row" style="border-bottom:1px solid var(--border)">
+      <div class="info-label">Risk Weighting Profile</div>
+      <div class="weight-bar">
+        <button class="wt-btn on" id="wt-balanced" onclick="setRiskWeight('balanced')">Balanced</button>
+        <button class="wt-btn" id="wt-wildfire" onclick="setRiskWeight('wildfire')">Fire</button>
+        <button class="wt-btn" id="wt-flood" onclick="setRiskWeight('flood')">Flood</button>
+        <button class="wt-btn" id="wt-industrial" onclick="setRiskWeight('industrial')">Industrial</button>
+        <button class="wt-btn" id="wt-seismic" onclick="setRiskWeight('seismic')">Seismic</button>
+      </div>
+    </div>
     <div class="info-row" style="border-bottom:none">
       <div class="info-sub" style="color:var(--muted)">Wind below affects which upwind facilities could reach this location by plume.</div>
     </div>
@@ -435,6 +451,7 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;background:var(--gree
       <button class="bm-btn" id="bm-terrain" onclick="setBaseMap('terrain')">Terrain</button>
     </div>
     <div class="layer-row" id="ly-labelsOverlay" onclick="toggleLayer('labelsOverlay')"><div class="tog"></div><div class="layer-dot" style="background:var(--cyan)"></div><span class="layer-name">Street / Place Labels</span></div>
+    <div class="layer-row" id="ly-faults" onclick="toggleFaults()"><div class="tog"></div><div class="layer-dot" style="background:#ff66aa"></div><span class="layer-name">Earthquake Faults</span></div>
 
     <div class="sec-head">Live Feeds <span class="live-badge" id="refreshFeedsBtn" onclick="refreshAllFeeds()">↻ REFRESH</span></div>
     <div class="feed-status" id="feedStatus">Feeds not loaded — tap a toggle or Refresh</div>
@@ -633,6 +650,18 @@ const CORRIDORS = [
   { name:'UP Valley Rail', color:'#ff8822', pts:[[38.74,-121.29],[38.10,-121.27],[37.64,-120.99],[36.74,-119.78],[35.37,-119.02],[35.00,-118.95]] },
 ];
 
+// Major California fault lines (simplified) — for seismic proximity scoring
+const FAULTS = [
+  { name:'San Andreas', pts:[[40.30,-124.40],[39.00,-123.70],[38.00,-122.80],[37.20,-121.90],[35.70,-120.30],[34.80,-118.90],[34.30,-117.50],[34.00,-116.90],[33.60,-116.30],[33.30,-115.70]] },
+  { name:'Hayward', pts:[[38.02,-122.28],[37.80,-122.18],[37.65,-122.06],[37.50,-121.94]] },
+  { name:'Calaveras', pts:[[37.50,-121.85],[37.20,-121.60],[36.90,-121.40]] },
+  { name:'Newport-Inglewood', pts:[[34.05,-118.40],[33.87,-118.28],[33.72,-118.07],[33.60,-117.93]] },
+  { name:'Elsinore', pts:[[33.90,-117.40],[33.60,-117.20],[33.40,-116.95],[32.90,-116.50]] },
+  { name:'San Jacinto', pts:[[34.10,-117.40],[33.80,-117.05],[33.40,-116.60],[32.90,-115.90]] },
+  { name:'Garlock', pts:[[35.00,-119.00],[35.30,-118.30],[35.45,-117.60],[35.50,-117.00]] },
+  { name:'Rose Canyon', pts:[[32.95,-117.26],[32.78,-117.23],[32.62,-117.14]] },
+];
+
 const HAZMAT = [
   { name:'Chlorine', color:'#88ff00', idlh:10, density:6.5, note:'Toxic gas, heavier than air' },
   { name:'Ammonia', color:'#00ffcc', idlh:300, density:3.5, note:'Toxic/corrosive gas' },
@@ -672,6 +701,16 @@ let feeds = { nws:false, calfire:false, quake:false };
 let feedData = { nws:[], calfire:[], quake:[] };
 let feedGroups = {};
 let batchData = [];
+let faultGroup = null, receptorGroup = null;
+let showFaults = false;
+let riskWeightMode = 'balanced';
+const RISK_WEIGHTS = {
+  balanced:   { wildfire:0.20, flood:0.20, hazmat:0.20, seismic:0.20, exposure:0.20 },
+  wildfire:   { wildfire:0.40, flood:0.15, hazmat:0.15, seismic:0.15, exposure:0.15 },
+  flood:      { wildfire:0.15, flood:0.40, hazmat:0.15, seismic:0.15, exposure:0.15 },
+  industrial: { wildfire:0.12, flood:0.12, hazmat:0.40, seismic:0.12, exposure:0.24 },
+  seismic:    { wildfire:0.15, flood:0.15, hazmat:0.15, seismic:0.40, exposure:0.15 },
+};
 let activeCorridor = 0;
 let manualWind = true;
 let layers = { primary:true, labels:true, corridors:true, facilities:true, labelsOverlay:false };
@@ -705,8 +744,10 @@ function initMap(){
   } catch(e){ console.warn('FEMA layer init failed', e); }
 
   corridorGroup = L.layerGroup().addTo(mapObj);
+  faultGroup = L.layerGroup().addTo(mapObj);
   facilityGroup = L.layerGroup().addTo(mapObj);
   epaGroup = L.layerGroup().addTo(mapObj);
+  receptorGroup = L.layerGroup().addTo(mapObj);
   feedGroups.nws = L.layerGroup().addTo(mapObj);
   feedGroups.calfire = L.layerGroup().addTo(mapObj);
   feedGroups.quake = L.layerGroup().addTo(mapObj);
@@ -1425,15 +1466,15 @@ function drawIncidentCard(){
       lines=[['Isolation (IDLH)',fmtDist(r.r.rIDLH),r.haz.color],['Protective (ERPG-2)',fmtDist(r.r.rERPG2),'#ff7a00'],['Precautionary (ERPG-1)',fmtDist(r.r.rERPG1),'#ffd000'],['Fireball if ignited',fmtDist(r.r.rFB),'#ff2d2d']];
     } else if(mode==='assess'&&r.latLon){
       const locName=document.getElementById('assessLoc').textContent;
-      subtitle=`${locName} · Overall risk: ${r.risk.label}`;
-      loc=`${r.latLon.lat.toFixed(4)}°N ${Math.abs(r.latLon.lon).toFixed(4)}°W · ${r.within.length} hazard(s) within ${r.radKm} km`;
-      const nRef=r.within.find(x=>x.f.cat==='refinery')||r.facAnalysis?.find?.(x=>x.f.cat==='refinery');
+      subtitle=`${locName} · Overall risk: ${r.risk.label} (${r.risk.overall}/100)`;
+      loc=`${r.latLon.lat.toFixed(4)}°N ${Math.abs(r.latLon.lon).toFixed(4)}°W · weighting: ${riskWeightMode}`;
+      const s=r.risk.sub;
       lines=[
-        ['FEMA flood zone', r.flood||'—', r.flood&&/zone (a|v)/i.test(r.flood)?'#ff2d2d':'#00ff88'],
-        ['CAL FIRE hazard', r.fire||'—', /very high/i.test(r.fire||'')?'#ff2d2d':/high/i.test(r.fire||'')?'#ff7a00':'#00ff88'],
-        ['Nearest hazmat corridor', isFinite(r.ncD)?fmtDist(r.ncD):'—', '#ffd000'],
-        ['Facility footprints reaching here', String(r.insideFootprints.length), r.insideFootprints.length?'#ff2d2d':'#00ff88'],
-        ['Overall risk score', `${r.risk.label} (${r.risk.score})`, r.risk.color],
+        ['Wildfire', String(s.wildfire), s.wildfire>=50?'#ff5500':'#00ff88'],
+        ['Flood', String(s.flood), s.flood>=50?'#2288ff':'#00ff88'],
+        ['Hazmat / Industrial', String(s.hazmat), s.hazmat>=50?'#ff2d2d':'#00ff88'],
+        ['Seismic', String(s.seismic), s.seismic>=50?'#ff7a00':'#00ff88'],
+        ['Exposure (people/receptors)', String(s.exposure), s.exposure>=50?'#ffd000':'#00ff88'],
       ];
     }
   }
@@ -1646,6 +1687,7 @@ async function runAssessment(lat,lon){
   document.getElementById('assessDataStatus').className='chem-tag yellow';
   document.getElementById('assessCoord').textContent=`${lat.toFixed(4)}°N ${Math.abs(lon).toFixed(4)}°W`;
   assessData={lat,lon,flood:'querying…',fire:'querying…',floodSFHA:false};
+  if(receptorGroup) receptorGroup.clearLayers();
   updateSim();
 
   // FEMA National Flood Hazard Layer — point query on layer 28
@@ -1682,33 +1724,120 @@ async function runAssessment(lat,lon){
     assessData.fireClass=cls;
   }catch(e){ assessData.fire='Unavailable (blocked/offline)'; }
 
+  // Nearby vulnerable sites (schools / hospitals) via OpenStreetMap Overpass
+  try{
+    const radM=Math.min(15000,(+document.getElementById('assessRad').value)*1000);
+    const q=`[out:json][timeout:20];(node["amenity"~"^(school|hospital|clinic)$"](around:${radM},${lat},${lon});way["amenity"~"^(school|hospital|clinic)$"](around:${radM},${lat},${lon}););out center 80;`;
+    const ou=`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(q)}`;
+    const oj=await (await fetch(ou)).json();
+    assessData.receptors=(oj.elements||[]).map(el=>{
+      const rlat=el.lat||(el.center&&el.center.lat), rlon=el.lon||(el.center&&el.center.lon);
+      if(!rlat) return null;
+      return { name:(el.tags&&el.tags.name)||'(unnamed)', type:el.tags.amenity, lat:rlat, lon:rlon, d:haversine(lat,lon,rlat,rlon) };
+    }).filter(Boolean).sort((a,b)=>a.d-b.d);
+    drawReceptors();
+  }catch(e){ assessData.receptors=null; }
+
   document.getElementById('assessDataStatus').textContent='DATA LOADED';
   document.getElementById('assessDataStatus').className='chem-tag flood';
   updateSim();
 }
+function drawReceptors(){
+  receptorGroup.clearLayers();
+  if(!assessData||!assessData.receptors) return;
+  assessData.receptors.forEach(r=>{
+    const col=r.type==='school'?'#ffd000':'#00ddff';
+    const sym=r.type==='school'?'S':'H';
+    const icon=L.divIcon({className:'',html:`<div style="width:12px;height:12px;background:${col}22;border:1px solid ${col};border-radius:2px;font-family:var(--mono);font-size:8px;color:${col};text-align:center;line-height:11px;">${sym}</div>`,iconSize:[12,12],iconAnchor:[6,6]});
+    const m=L.marker([r.lat,r.lon],{icon});
+    m.bindPopup(`<div class="popup-site-name">${r.name}</div><div class="popup-addr">${r.type} · ${fmtM(r.d)} from assessed point</div>`);
+    receptorGroup.addLayer(m);
+  });
+}
 
-function computeRisk(insideFootprints,facAnalysis,ncD,ad){
-  let score=0; const factors=[];
-  if(insideFootprints.some(x=>x.inside==='BLAST')){score+=4;factors.push(['Inside a facility blast footprint','var(--red)']);}
-  else if(insideFootprints.some(x=>x.inside==='PLUME')){score+=3;factors.push(['Inside a facility plume footprint (current wind)','var(--purple)']);}
-  const nearest=facAnalysis[0];
-  if(nearest&&nearest.d<1000){score+=2;factors.push([`Within 1 km of ${nearest.f.name}`,'var(--orange)']);}
-  else if(nearest&&nearest.d<3000){score+=1;factors.push([`Within 3 km of ${nearest.f.name}`,'var(--yellow)']);}
-  if(ncD<500){score+=2;factors.push(['Adjacent to a hazmat corridor (<500 m)','var(--orange)']);}
-  else if(ncD<1500){score+=1;factors.push(['Near a hazmat corridor (<1.5 km)','var(--yellow)']);}
-  if(ad){
-    if(ad.floodSFHA){score+=2;factors.push(['In a FEMA Special Flood Hazard Area','var(--flood)']);}
-    if(/very high/i.test(ad.fireClass||'')){score+=3;factors.push(['In a Very High Fire Hazard Severity Zone','var(--red)']);}
-    else if(/high/i.test(ad.fireClass||'')){score+=2;factors.push(['In a High Fire Hazard Severity Zone','var(--orange)']);}
-    else if(/moderate/i.test(ad.fireClass||'')){score+=1;factors.push(['In a Moderate Fire Hazard Severity Zone','var(--yellow)']);}
+function distToFault(lat,lon){
+  let best=Infinity, name='';
+  FAULTS.forEach(f=>{ const d=distToCorridor(lat,lon,f); if(d<best){best=d;name=f.name;} });
+  return {d:best,name};
+}
+function drawFaults(){
+  faultGroup.clearLayers();
+  if(!showFaults) return;
+  FAULTS.forEach(f=>{
+    const line=L.polyline(f.pts,{color:'#ff66aa',weight:1.5,opacity:0.5,dashArray:'1,4'});
+    line.bindTooltip(f.name+' Fault',{sticky:true});
+    faultGroup.addLayer(line);
+  });
+}
+
+// Composite multi-factor risk. Each sub-score 0-100.
+function computeMultiRisk(ctx){
+  const { insideFootprints, facAnalysis, ncD, ad, live, faultInfo, receptors, radKm } = ctx;
+  const clamp=v=>Math.max(0,Math.min(100,Math.round(v)));
+  const factors=[];
+
+  // ── WILDFIRE ──
+  let wildfire=15, fireKnown=true;
+  const fc=(ad&&ad.fireClass)||'';
+  if(/very high/i.test(fc)){wildfire=90;factors.push(['Very High Fire Hazard Severity Zone','var(--red)']);}
+  else if(/high/i.test(fc)){wildfire=65;factors.push(['High Fire Hazard Severity Zone','var(--orange)']);}
+  else if(/moderate/i.test(fc)){wildfire=40;factors.push(['Moderate Fire Hazard Severity Zone','var(--yellow)']);}
+  else if(ad&&/unavailable/i.test(ad.fire||'')){wildfire=30;fireKnown=false;}
+  if(live&&live.fire&&live.fire.d<10000){wildfire=clamp(wildfire+20);factors.push([`Active fire ${fmtM(live.fire.d)} away`,'var(--fire)']);}
+  wildfire=clamp(wildfire);
+
+  // ── FLOOD ──
+  let flood=10, floodKnown=true;
+  const fz=(ad&&ad.flood)||'';
+  if(/zone (v|ve)/i.test(fz)){flood=95;factors.push(['FEMA Zone V — coastal high hazard','var(--red)']);}
+  else if(/zone (a|ae|ah|ao)/i.test(fz)){flood=80;factors.push(['FEMA Special Flood Hazard Area','var(--flood)']);}
+  else if(/0\.2%|shaded|zone x \(/i.test(fz)){flood=40;factors.push(['0.2% annual (500-yr) flood fringe','var(--yellow)']);}
+  else if(/unavailable/i.test(fz)){flood=30;floodKnown=false;}
+  if(live&&live.alerts.some(a=>/flood/i.test(a))){flood=clamp(flood+15);factors.push(['Active NWS flood alert','var(--red)']);}
+  flood=clamp(flood);
+
+  // ── HAZMAT / INDUSTRIAL ──
+  let hazmat=10;
+  if(insideFootprints.some(x=>x.inside==='BLAST')){hazmat=90;factors.push(['Inside a facility blast footprint','var(--red)']);}
+  else if(insideFootprints.some(x=>x.inside==='PLUME')){hazmat=70;factors.push(['Inside a facility plume footprint','var(--purple)']);}
+  else { const n=facAnalysis[0]; if(n){ if(n.d<500)hazmat=65; else if(n.d<1000)hazmat=55; else if(n.d<3000)hazmat=40; else if(n.d<8000)hazmat=25; else hazmat=10; } }
+  if(ncD<500){hazmat=clamp(hazmat+15);factors.push(['Adjacent to hazmat transport corridor','var(--orange)']);}
+  else if(ncD<1500){hazmat=clamp(hazmat+8);}
+  hazmat=clamp(hazmat);
+
+  // ── SEISMIC ──
+  let seismic=30;
+  if(faultInfo){ const d=faultInfo.d;
+    if(d<2000)seismic=90; else if(d<5000)seismic=75; else if(d<10000)seismic=60; else if(d<25000)seismic=45; else seismic=30;
+    if(d<10000) factors.push([`${fmtM(d)} from ${faultInfo.name} Fault`,'var(--orange)']);
   }
+  if(live&&live.quakes>0) seismic=clamp(seismic+Math.min(15,live.quakes*5));
+  seismic=clamp(seismic);
+
+  // ── EXPOSURE / VULNERABILITY ──
+  let exposure={urban:60,suburban:40,rural:15,mixed:45}[densityMode]||45;
+  let schools=0,hospitals=0;
+  if(receptors){
+    schools=receptors.filter(r=>r.type==='school').length;
+    hospitals=receptors.filter(r=>r.type==='hospital'||r.type==='clinic').length;
+    exposure+=Math.min(25,schools*5)+Math.min(24,hospitals*8);
+    if(schools) factors.push([`${schools} school(s) within ${radKm} km`,'var(--yellow)']);
+    if(hospitals) factors.push([`${hospitals} hospital/clinic within ${radKm} km`,'var(--blue)']);
+  }
+  exposure=clamp(exposure);
+
+  const sub={wildfire,flood,hazmat,seismic,exposure};
+  const w=RISK_WEIGHTS[riskWeightMode];
+  const overall=clamp(sub.wildfire*w.wildfire+sub.flood*w.flood+sub.hazmat*w.hazmat+sub.seismic*w.seismic+sub.exposure*w.exposure);
+
   let label,color;
-  if(score>=6){label='SEVERE';color='#ff2d2d';}
-  else if(score>=4){label='HIGH';color='#ff7a00';}
-  else if(score>=2){label='ELEVATED';color='#ffd000';}
-  else if(score>=1){label='MODERATE';color='#00aaff';}
+  if(overall>=70){label='SEVERE';color='#ff2d2d';}
+  else if(overall>=50){label='HIGH';color='#ff7a00';}
+  else if(overall>=30){label='ELEVATED';color='#ffd000';}
+  else if(overall>=15){label='MODERATE';color='#00aaff';}
   else {label='LOW';color='#00ff88';}
-  return {score,label,color,factors};
+
+  return {overall,score:overall,label,color,sub,factors,schools,hospitals,fireKnown,floodKnown};
 }
 
 function addAssessMarker(lat,lon){
@@ -1759,67 +1888,90 @@ function drawAssess(windSpd,windDeg){
   within.slice(0,6).forEach(x=>{ if(!x.inside) addThreatLine(lat,lon,x.f.lat,x.f.lon,'#00ffdd44'); });
   addAssessMarker(lat,lon);
 
-  const risk=computeRisk(insideFootprints,facAnalysis,ncD,assessData);
-  // live feed enrichment
   const live=liveHazardsNear(lat,lon,radKm);
-  if(live.alerts.length){ risk.score+=2; risk.factors.unshift([`Active NWS alert: ${live.alerts.join(', ')}`,'var(--red)']);
-    if(risk.score>=6&&risk.label!=='SEVERE'){risk.label='SEVERE';risk.color='#ff2d2d';}
-    else if(risk.score>=4&&risk.label==='ELEVATED'){risk.label='HIGH';risk.color='#ff7a00';} }
-  if(live.fire){ risk.factors.push([`Active CAL FIRE incident ${fmtM(live.fire.d)} away (${live.fire.name})`,'var(--fire)']); }
-  renderAssess({lat,lon,radKm,facAnalysis,within,insideFootprints,nc,ncD,risk,live});
-  lastResult={mode:'assess',latLon:{lat,lon},radKm,risk,within,insideFootprints,nc,ncD,facAnalysis,windSpd,windDeg,
+  const faultInfo=distToFault(lat,lon);
+  const receptors=assessData?assessData.receptors:null;
+  const risk=computeMultiRisk({insideFootprints,facAnalysis,ncD,ad:assessData,live,faultInfo,receptors,radKm});
+  renderAssess({lat,lon,radKm,facAnalysis,within,insideFootprints,nc,ncD,risk,live,faultInfo,receptors});
+  lastResult={mode:'assess',latLon:{lat,lon},radKm,risk,within,insideFootprints,nc,ncD,facAnalysis,faultInfo,receptors,windSpd,windDeg,
     flood:assessData?assessData.flood:'…',fire:assessData?assessData.fire:'…'};
 
   document.getElementById('sbSite').textContent='ASSESS: '+(document.getElementById('assessLoc').textContent||'location').toUpperCase();
-  document.getElementById('sbChem').textContent=`${within.length} hazard(s) within ${radKm} km · RISK ${risk.label}`;
+  document.getElementById('sbChem').textContent=`Overall risk ${risk.overall}/100 · ${risk.label}`;
   document.getElementById('sbWind').textContent=`FLOOD: ${assessData?assessData.flood:'…'} · FIRE: ${assessData?assessData.fire:'…'}`;
 }
 
 function nearestByCat(facAnalysis,cat){ return facAnalysis.find(x=>x.f.cat===cat); }
 
-function renderAssess({lat,lon,radKm,facAnalysis,within,insideFootprints,nc,ncD,risk,live}){
-  document.getElementById('rhead1').textContent='Threat Profile';
+function setRiskWeight(m){
+  riskWeightMode=m;
+  ['balanced','wildfire','flood','industrial','seismic'].forEach(k=>document.getElementById('wt-'+k).classList.toggle('on',k===m));
+  if(mode==='assess'&&assessPoint) updateSim();
+}
+function toggleFaults(){
+  showFaults=!showFaults;
+  document.getElementById('ly-faults').classList.toggle('on',showFaults);
+  drawFaults();
+}
+
+function subBar(name,val){
+  const c = val>=70?'#ff2d2d':val>=50?'#ff7a00':val>=30?'#ffd000':val>=15?'#00aaff':'#00ff88';
+  return `<tr><td>${name}</td><td><div style="display:flex;align-items:center;gap:6px;justify-content:flex-end">
+    <div style="flex:1;height:6px;background:var(--border2);max-width:88px;"><div style="height:100%;width:${val}%;background:${c};"></div></div>
+    <span style="color:${c};min-width:22px;">${val}</span></div></td></tr>`;
+}
+
+function renderAssess({lat,lon,radKm,facAnalysis,within,insideFootprints,nc,ncD,risk,live,faultInfo,receptors}){
+  document.getElementById('rhead1').textContent='Risk Breakdown';
   const ad=assessData||{};
-  const nRef=nearestByCat(facAnalysis,'refinery'), nNuke=nearestByCat(facAnalysis,'nuclear'),
-        nDam=nearestByCat(facAnalysis,'dam'), nPort=nearestByCat(facAnalysis,'port');
+  const s=risk.sub;
+  const schools=receptors?receptors.filter(r=>r.type==='school').length:null;
+  const hosp=receptors?receptors.filter(r=>r.type==='hospital'||r.type==='clinic').length:null;
   const floodCol = ad.floodSFHA?'c-red':'c-green';
   const fireCol = /very high/i.test(ad.fireClass||'')?'c-red':/high/i.test(ad.fireClass||'')?'c-orange':/moderate/i.test(ad.fireClass||'')?'c-yellow':'c-green';
-  const liveAlerts = live&&live.alerts.length?live.alerts.length:(feedData.nws.length?0:'—');
-  const liveFire = live&&live.fire?fmtM(live.fire.d):(feedData.calfire.length?'none near':'—');
+
   document.getElementById('readoutTable').innerHTML=`
+    <tr><td style="padding-top:10px;">OVERALL</td><td style="text-align:right;"><span style="font-family:var(--mono);font-size:22px;color:${risk.color};font-weight:600;">${risk.overall}</span><span style="font-size:10px;color:var(--dim);">/100 · ${risk.label}</span></td></tr>
+    ${subBar('Wildfire',s.wildfire)}
+    ${subBar('Flood',s.flood)}
+    ${subBar('Hazmat',s.hazmat)}
+    ${subBar('Seismic',s.seismic)}
+    ${subBar('Exposure',s.exposure)}
+    <tr><td colspan="2" style="padding-top:10px;color:var(--muted);font-size:8.5px;letter-spacing:1px;">─ SITE DETAIL ─</td></tr>
     <tr><td>FEMA flood zone</td><td class="${floodCol}">${ad.flood||'…'}</td></tr>
     <tr><td>CAL FIRE hazard</td><td class="${fireCol}">${ad.fire||'…'}</td></tr>
-    <tr><td>Active NWS alerts here</td><td class="${live&&live.alerts.length?'c-red':'c-dim'}">${liveAlerts}</td></tr>
-    <tr><td>Nearest active fire</td><td class="${live&&live.fire?'c-fire':'c-dim'}">${liveFire}</td></tr>
-    <tr><td>Nearest refinery</td><td class="c-orange">${nRef?fmtM(nRef.d):'—'}</td></tr>
-    <tr><td>Nearest nuclear</td><td style="color:var(--purple)">${nNuke?fmtM(nNuke.d):'—'}</td></tr>
-    <tr><td>Nearest dam</td><td class="c-blue">${nDam?fmtM(nDam.d):'—'}</td></tr>
-    <tr><td>Nearest hazmat corridor</td><td class="c-yellow">${isFinite(ncD)?fmtM(ncD)+' ('+nc.name+')':'—'}</td></tr>
-    <tr><td>Hazards within ${radKm} km</td><td class="c-green">${within.length}</td></tr>`;
+    <tr><td>Nearest fault</td><td class="c-orange">${faultInfo?fmtM(faultInfo.d)+' ('+faultInfo.name+')':'—'}</td></tr>
+    <tr><td>Nearest hazmat corridor</td><td class="c-yellow">${isFinite(ncD)?fmtM(ncD):'—'}</td></tr>
+    <tr><td>Schools within ${radKm} km</td><td class="${schools?'c-yellow':'c-dim'}">${schools==null?'…':schools}</td></tr>
+    <tr><td>Hospitals/clinics</td><td class="${hosp?'c-blue':'c-dim'}">${hosp==null?'…':hosp}</td></tr>
+    <tr><td>Active NWS alerts here</td><td class="${live&&live.alerts.length?'c-red':'c-dim'}">${live&&live.alerts.length?live.alerts.length:(feedData.nws.length?0:'—')}</td></tr>
+    <tr><td>Nearest active fire</td><td class="${live&&live.fire?'c-fire':'c-dim'}">${live&&live.fire?fmtM(live.fire.d):(feedData.calfire.length?'none near':'—')}</td></tr>`;
 
-  document.getElementById('evacTitle').innerHTML=`⚠ Overall Risk: <span style="color:${risk.color}">${risk.label}</span>`;
+  document.getElementById('evacTitle').innerHTML=`⚠ Overall: <span style="color:${risk.color}">${risk.label} (${risk.overall})</span>`;
   document.getElementById('evacLines').innerHTML = risk.factors.length
     ? risk.factors.map(([t,c])=>`<div class="evac-line"><div class="evac-dot" style="background:${c}"></div>${t}</div>`).join('')
     : `<div class="evac-line"><div class="evac-dot" style="background:var(--green)"></div>No significant mapped threats at this location</div>`;
 
-  // reuse exposure panel for footprint memberships
-  document.getElementById('expPopVal').textContent=insideFootprints.length
-    ? insideFootprints.length+' footprint(s)' : 'Clear';
-  document.getElementById('expPop').innerHTML=`Address falls inside: <b id="expPopVal">${insideFootprints.length?insideFootprints.length+' footprint(s)':'none'}</b><br><span style="color:var(--muted)">Facility hazard zones reaching this point (current wind)</span>`;
-  const listSrc = insideFootprints.length?insideFootprints:within.slice(0,8);
-  document.getElementById('expBox').innerHTML = listSrc.length
-    ? listSrc.map(x=>{
-        const col=x.inside==='BLAST'?'var(--red)':x.inside==='PLUME'?'var(--purple)':x.cat.color;
-        const z=x.inside?x.inside:'NEARBY';
-        return `<div class="exp-row"><span class="exp-name">${x.f.name}<br><span style="color:var(--muted);font-size:9.5px">${x.cat.label} · ${fmtM(x.d)}</span></span><span class="exp-zone" style="color:${col};border-color:${col}55">${z}</span></div>`;
-      }).join('')
-    : `<div class="exp-empty">No facilities within ${radKm} km</div>`;
+  document.getElementById('expPop').innerHTML=`Facility footprints reaching here: <b id="expPopVal">${insideFootprints.length?insideFootprints.length:'none'}</b><br><span style="color:var(--muted)">Blast/plume zones + nearest schools & hospitals</span>`;
+  const facList = insideFootprints.length?insideFootprints:within.slice(0,5);
+  const recList = receptors?receptors.slice(0,4):[];
+  let html = facList.map(x=>{
+    const col=x.inside==='BLAST'?'var(--red)':x.inside==='PLUME'?'var(--purple)':x.cat.color;
+    const z=x.inside?x.inside:'NEARBY';
+    return `<div class="exp-row"><span class="exp-name">${x.f.name}<br><span style="color:var(--muted);font-size:9.5px">${x.cat.label} · ${fmtM(x.d)}</span></span><span class="exp-zone" style="color:${col};border-color:${col}55">${z}</span></div>`;
+  }).join('');
+  html += recList.map(r=>{
+    const col=r.type==='school'?'var(--yellow)':'var(--blue)';
+    return `<div class="exp-row"><span class="exp-name">${r.name}<br><span style="color:var(--muted);font-size:9.5px">${r.type} · ${fmtM(r.d)}</span></span><span class="exp-zone" style="color:${col};border-color:${col}55">${r.type.toUpperCase()}</span></div>`;
+  }).join('');
+  document.getElementById('expBox').innerHTML = html || `<div class="exp-empty">No facilities or receptors within ${radKm} km</div>`;
 
   document.getElementById('legendBox').innerHTML=legendRows([
     ['rgba(0,255,221,.5)','Assessed location','','c-green'],
     ['rgba(255,45,45,.5)','Facility footprint reaches here','','c-red'],
-    ['rgba(0,255,221,.2)','Within proximity radius','','c-green'],
-  ])+`<div class="evac-disclaimer" style="border:none">Flood: FEMA NFHL · Fire: CAL FIRE FHSZ<br>Proximity from statewide facility dataset</div>`;
+    ['rgba(255,208,0,.6)','School','','c-yellow'],
+    ['rgba(0,221,255,.6)','Hospital / clinic','','c-blue'],
+  ])+`<div class="evac-disclaimer" style="border:none">Flood: FEMA · Fire: CAL FIRE · Sites: OpenStreetMap<br>Faults: simplified major CA faults · Weighting: ${riskWeightMode}</div>`;
 }
 
 function renderAssessEmpty(){
@@ -2047,15 +2199,28 @@ function generatePDF(){
     doc.text(locName,M,y); y+=16;
     doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(120,120,120);
     doc.text(`${r.latLon.lat.toFixed(5)}°N ${Math.abs(r.latLon.lon).toFixed(5)}°W`,M,y); y+=24;
-    row('Overall Risk',`${r.risk.label} (score ${r.risk.score})`,r.risk.color?hexToRgb(r.risk.color):accent);
+    row('Overall Risk',`${r.risk.label} — ${r.risk.overall}/100`,r.risk.color?hexToRgb(r.risk.color):accent);
+    // sub-score breakdown
+    doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(90,90,90);
+    doc.text('SUB-SCORES (0–100)',M,y); y+=16;
+    const subs=[['Wildfire',r.risk.sub.wildfire],['Flood',r.risk.sub.flood],['Hazmat',r.risk.sub.hazmat],['Seismic',r.risk.sub.seismic],['Exposure',r.risk.sub.exposure]];
+    subs.forEach(([n,v])=>{
+      doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(80,80,80);
+      doc.text(n,M,y);
+      const barX=M+90, barW=300, fillW=barW*v/100;
+      doc.setFillColor(230,230,230); doc.rect(barX,y-8,barW,9,'F');
+      const rc=v>=70?[255,45,45]:v>=50?[255,122,0]:v>=30?[255,208,0]:v>=15?[0,170,255]:[0,200,120];
+      doc.setFillColor(rc[0],rc[1],rc[2]); doc.rect(barX,y-8,fillW,9,'F');
+      doc.setTextColor(60,60,60); doc.setFont('helvetica','bold'); doc.text(String(v),barX+barW+12,y);
+      y+=18;
+    });
+    y+=8;
     row('FEMA Flood Zone',r.flood||'—');
     row('CAL FIRE Hazard',r.fire||'—');
+    row('Nearest Fault',r.faultInfo?`${fmtM(r.faultInfo.d)} (${r.faultInfo.name})`:'—');
     row('Nearest Hazmat Corridor',isFinite(r.ncD)?fmtDist(r.ncD)+' ('+r.nc.name+')':'—');
+    row('Schools / Hospitals Nearby',r.receptors?`${r.receptors.filter(x=>x.type==='school').length} schools · ${r.receptors.filter(x=>x.type!=='school').length} medical`:'not loaded');
     row('Facility Footprints Reaching Here',r.insideFootprints.length);
-    row('Hazards Within '+r.radKm+' km',r.within.length);
-    const live=liveHazardsNear(r.latLon.lat,r.latLon.lon,r.radKm);
-    row('Active NWS Alerts',live.alerts.length?live.alerts.join(', '):'None loaded/active');
-    row('Nearest Active Fire',live.fire?`${live.fire.name} (${fmtM(live.fire.d)})`:'None loaded/active');
     y+=6;
     doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(40,40,40);
     doc.text('Contributing Risk Factors',M,y); y+=16;
@@ -2095,11 +2260,13 @@ function buildPostText(){
   if(mode==='assess'&&r.latLon){
     const loc=document.getElementById('assessLoc').textContent;
     const live=liveHazardsNear(r.latLon.lat,r.latLon.lon,r.radKm);
+    const s=r.risk.sub;
     let t=`⚠️ THREAT SNAPSHOT — ${loc}\n\n`;
-    t+=`Overall risk: ${r.risk.label}\n`;
-    t+=`🌊 FEMA flood: ${r.flood}\n🔥 Fire hazard: ${r.fire}\n`;
-    if(isFinite(r.ncD)) t+=`🚂 Nearest hazmat corridor: ${fmtM(r.ncD)} (${r.nc.name})\n`;
-    if(r.insideFootprints.length) t+=`🏭 Inside ${r.insideFootprints.length} industrial hazard footprint(s)\n`;
+    t+=`Overall risk: ${r.risk.label} (${r.risk.overall}/100)\n`;
+    t+=`🔥 Fire ${s.wildfire} · 🌊 Flood ${s.flood} · 🏭 Hazmat ${s.hazmat} · 🌐 Seismic ${s.seismic}\n\n`;
+    t+=`FEMA flood: ${r.flood}\nFire hazard: ${r.fire}\n`;
+    if(r.faultInfo&&r.faultInfo.d<15000) t+=`Fault: ${fmtM(r.faultInfo.d)} from ${r.faultInfo.name}\n`;
+    if(r.insideFootprints.length) t+=`Inside ${r.insideFootprints.length} industrial hazard footprint(s)\n`;
     if(live.alerts.length) t+=`📢 Active NWS: ${live.alerts.join(', ')}\n`;
     t+=`\n#OrangeCounty #PublicSafety #SoCal`;
     return t;
@@ -2135,54 +2302,50 @@ async function runBatch(){
       const g=await (await fetch(gu)).json();
       if(!g.length){ batchData.push({addr:lines[i],err:'Not found'}); continue; }
       const lat=+g[0].lat, lon=+g[0].lon;
-      const a=assessSilent(lat,lon,windSpd,windDeg);
-      // live flood/fire per point
-      let flood='—',fire='—';
-      try{ const fj=await (await fetch(`https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=FLD_ZONE,SFHA_TF&returnGeometry=false&f=json`)).json(); if(fj.features&&fj.features.length){flood='Zone '+fj.features[0].attributes.FLD_ZONE; if(fj.features[0].attributes.SFHA_TF==='T') a.score+=2;} else flood='X'; }catch(e){}
-      batchData.push({addr:lines[i],lat,lon,flood,...a});
+      // per-point FEMA flood
+      let ad={flood:'X',fireClass:null,fire:'Not queried'};
+      try{ const fj=await (await fetch(`https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=FLD_ZONE,SFHA_TF&returnGeometry=false&f=json`)).json(); if(fj.features&&fj.features.length){ad.flood='Zone '+fj.features[0].attributes.FLD_ZONE;ad.floodSFHA=(fj.features[0].attributes.SFHA_TF==='T');} }catch(e){}
+      const a=assessSilent(lat,lon,windSpd,windDeg,ad);
+      batchData.push({addr:lines[i],lat,lon,...a});
       renderBatch();
     }catch(e){ batchData.push({addr:lines[i],err:'Error'}); }
     await sleep(1100);
   }
-  batchData.sort((a,b)=>(b.score||-1)-(a.score||-1));
+  batchData.sort((a,b)=>(b.overall||-1)-(a.overall||-1));
   renderBatch();
-  prog.textContent=`Done — ${batchData.filter(b=>!b.err).length} assessed, ranked by risk.`;
+  prog.textContent=`Done — ${batchData.filter(b=>!b.err).length} assessed, ranked by overall risk. (Batch skips live fire & receptor lookups for speed.)`;
   document.getElementById('batchCsvBtn').style.display='inline-block';
   btn.disabled=false;
 }
-function assessSilent(lat,lon,windSpd,windDeg){
-  let insideCount=0, nearestD=Infinity, nearestName='';
-  allFacilities().forEach(f=>{
-    const cat=FAC_CATS[f.cat]||{density:6.2,hoc:40e6,idlhFactor:1,propane:false,defVol:20000,special:null};
-    const d=haversine(lat,lon,f.lat,f.lon);
-    if(d<nearestD){nearestD=d;nearestName=f.name;}
+function assessSilent(lat,lon,windSpd,windDeg,ad){
+  const facAnalysis=allFacilities().map(f=>{
+    const cat=FAC_CATS[f.cat]||{label:'EPA',color:'#66e0ff',density:6.2,hoc:40e6,idlhFactor:1,propane:false,defVol:20000,special:null};
+    const d=haversine(lat,lon,f.lat,f.lon); let inside=null;
     if(!cat.special||cat.special==='nuclear'){
       const r=calcChem(f,cat.defVol||20000,0.03,windSpd,windDeg,cat.density,cat.hoc,cat.idlhFactor,cat.propane);
-      if(d<=r.rSV) insideCount++;
-      else if(d<=r.rIDLH){ const b=bearingBetween(f.lat,f.lon,lat,lon); if(Math.abs(((b-r.plumeTo+540)%360)-180)<=40) insideCount++; }
+      if(d<=r.rSV) inside='BLAST'; else if(d<=r.rIDLH){ const b=bearingBetween(f.lat,f.lon,lat,lon); if(Math.abs(((b-r.plumeTo+540)%360)-180)<=40) inside='PLUME'; }
     }
-  });
+    return {f,cat,d,inside};
+  }).sort((a,b)=>a.d-b.d);
+  const insideFootprints=facAnalysis.filter(x=>x.inside);
   let ncD=Infinity; CORRIDORS.forEach(c=>{ const d=distToCorridor(lat,lon,c); if(d<ncD)ncD=d; });
-  let score=0;
-  if(insideCount>0) score+=3;
-  if(nearestD<1000) score+=2; else if(nearestD<3000) score+=1;
-  if(ncD<500) score+=2; else if(ncD<1500) score+=1;
-  const label=score>=6?'SEVERE':score>=4?'HIGH':score>=2?'ELEVATED':score>=1?'MODERATE':'LOW';
-  return {score,label,insideCount,nearestD,nearestName,ncD};
+  const faultInfo=distToFault(lat,lon);
+  const risk=computeMultiRisk({insideFootprints,facAnalysis,ncD,ad,live:null,faultInfo,receptors:null,radKm:+document.getElementById('assessRad').value});
+  return {overall:risk.overall,label:risk.label,sub:risk.sub,flood:ad.flood,insideCount:insideFootprints.length,nearestName:facAnalysis[0]?facAnalysis[0].f.name:'',nearestD:facAnalysis[0]?facAnalysis[0].d:Infinity,ncD,faultName:faultInfo.name,faultD:faultInfo.d};
 }
 function riskColor(label){ return {SEVERE:'#ff2d2d',HIGH:'#ff7a00',ELEVATED:'#ffd000',MODERATE:'#00aaff',LOW:'#00ff88'}[label]||'#888'; }
 function renderBatch(){
   const res=document.getElementById('batchResults');
   const rows=batchData.map((b,i)=>{
-    if(b.err) return `<tr><td>${i+1}</td><td>${b.addr}</td><td colspan="4" style="color:var(--dim)">${b.err}</td></tr>`;
+    if(b.err) return `<tr><td>${i+1}</td><td>${b.addr}</td><td colspan="6" style="color:var(--dim)">${b.err}</td></tr>`;
     const c=riskColor(b.label);
-    return `<tr><td>${i+1}</td><td>${b.addr}</td><td><span class="batch-rank" style="color:${c};border-color:${c}">${b.label}</span></td><td>${b.flood||'—'}</td><td>${b.insideCount}</td><td>${isFinite(b.ncD)?fmtM(b.ncD):'—'}</td></tr>`;
+    return `<tr><td>${i+1}</td><td>${b.addr}</td><td><span class="batch-rank" style="color:${c};border-color:${c}">${b.overall} ${b.label}</span></td><td>${b.sub.wildfire}</td><td>${b.sub.flood}</td><td>${b.sub.hazmat}</td><td>${b.sub.seismic}</td><td>${b.flood||'—'}</td></tr>`;
   }).join('');
-  res.innerHTML=`<table><tr><th>#</th><th>Address</th><th>Risk</th><th>Flood</th><th>Footprints</th><th>Corridor</th></tr>${rows}</table>`;
+  res.innerHTML=`<table><tr><th>#</th><th>Address</th><th>Overall</th><th>Fire</th><th>Flood</th><th>Haz</th><th>Quake</th><th>FEMA</th></tr>${rows}</table>`;
 }
 function exportBatchCsv(){
-  const hdr='rank,address,lat,lon,risk_label,risk_score,flood_zone,footprints_inside,nearest_facility,nearest_facility_m,nearest_corridor_m\n';
-  const rows=batchData.map((b,i)=>b.err?`${i+1},"${b.addr}",,,ERROR,,,,,,`:`${i+1},"${b.addr}",${b.lat.toFixed(5)},${b.lon.toFixed(5)},${b.label},${b.score},${b.flood||''},${b.insideCount},"${b.nearestName}",${Math.round(b.nearestD)},${isFinite(b.ncD)?Math.round(b.ncD):''}`).join('\n');
+  const hdr='rank,address,lat,lon,overall,risk_label,wildfire,flood,hazmat,seismic,exposure,fema_flood_zone,footprints_inside,nearest_facility,nearest_facility_m,nearest_corridor_m,nearest_fault,nearest_fault_m\n';
+  const rows=batchData.map((b,i)=>b.err?`${i+1},"${b.addr}",,,,ERROR,,,,,,,,,,,,`:`${i+1},"${b.addr}",${b.lat.toFixed(5)},${b.lon.toFixed(5)},${b.overall},${b.label},${b.sub.wildfire},${b.sub.flood},${b.sub.hazmat},${b.sub.seismic},${b.sub.exposure},${b.flood||''},${b.insideCount},"${b.nearestName}",${Math.round(b.nearestD)},${isFinite(b.ncD)?Math.round(b.ncD):''},"${b.faultName}",${Math.round(b.faultD)}`).join('\n');
   const blob=new Blob([hdr+rows],{type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`oc-scanner-batch-${Date.now()}.csv`; a.click();
 }
