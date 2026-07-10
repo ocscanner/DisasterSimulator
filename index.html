@@ -452,6 +452,7 @@ input[type=range]::-moz-range-thumb{width:12px;height:12px;background:var(--gree
     </div>
     <div class="layer-row" id="ly-labelsOverlay" onclick="toggleLayer('labelsOverlay')"><div class="tog"></div><div class="layer-dot" style="background:var(--cyan)"></div><span class="layer-name">Street / Place Labels</span></div>
     <div class="layer-row" id="ly-faults" onclick="toggleFaults()"><div class="tog"></div><div class="layer-dot" style="background:#ff66aa"></div><span class="layer-name">Earthquake Faults</span></div>
+    <div class="layer-row" id="ly-tsunami" onclick="toggleTsunami()"><div class="tog"></div><div class="layer-dot" style="background:#00c8ff"></div><span class="layer-name">Tsunami Hazard Area (CGS)</span></div>
 
     <div class="sec-head">Live Feeds <span class="live-badge" id="refreshFeedsBtn" onclick="refreshAllFeeds()">↻ REFRESH</span></div>
     <div class="feed-status" id="feedStatus">Feeds not loaded — tap a toggle or Refresh</div>
@@ -685,7 +686,7 @@ let densityMode = 'mixed';
 // STATE
 // ══════════════════════════════════════════════════════════════
 let mode = 'chem';
-let mapObj, BASEMAPS, currentBase, labelsOverlay, femaFlood, markerGroup, corridorGroup, facilityGroup;
+let mapObj, BASEMAPS, currentBase, labelsOverlay, femaFlood, tsunamiLayer, markerGroup, corridorGroup, facilityGroup;
 let overlays = [];
 let activeFacilityIdx = 0;        // index into FACILITIES (default: Chevron Richmond)
 let facFilter = { refinery:true, propane:true, chemical:true, nuclear:true, port:true, dam:true, airport:true, rail:true };
@@ -713,7 +714,7 @@ const RISK_WEIGHTS = {
 };
 let activeCorridor = 0;
 let manualWind = true;
-let layers = { primary:true, labels:true, corridors:true, facilities:true, labelsOverlay:false };
+let layers = { primary:true, labels:true, corridors:true, facilities:true, labelsOverlay:false, tsunami:false };
 let lastResult = null;
 
 // ══════════════════════════════════════════════════════════════
@@ -742,6 +743,14 @@ function initMap(){
       layers:[28],   // S_FLD_HAZ_AR flood hazard areas
     });
   } catch(e){ console.warn('FEMA layer init failed', e); }
+
+  // CGS California Tsunami Hazard Areas (official CGS / Cal OES)
+  try {
+    tsunamiLayer = L.esri.dynamicMapLayer({
+      url:'https://services.gis.ca.gov/arcgis/rest/services/Oceans/Tsunami/MapServer',
+      opacity:0.40, layers:[0],
+    });
+  } catch(e){ console.warn('Tsunami layer init failed', e); }
 
   corridorGroup = L.layerGroup().addTo(mapObj);
   faultGroup = L.layerGroup().addTo(mapObj);
@@ -1724,6 +1733,13 @@ async function runAssessment(lat,lon){
     assessData.fireClass=cls;
   }catch(e){ assessData.fire='Unavailable (blocked/offline)'; }
 
+  // CGS Tsunami Hazard Area — point query (coastal inundation)
+  try{
+    const tu=`https://services.gis.ca.gov/arcgis/rest/services/Oceans/Tsunami/MapServer/0/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&returnGeometry=false&outFields=Label&f=json`;
+    const tj=await (await fetch(tu)).json();
+    assessData.tsunami = !!(tj.features && tj.features.length);
+  }catch(e){ assessData.tsunami=null; }
+
   // Nearby vulnerable sites (schools / hospitals) via OpenStreetMap Overpass
   try{
     const radM=Math.min(15000,(+document.getElementById('assessRad').value)*1000);
@@ -1793,7 +1809,8 @@ function computeMultiRisk(ctx){
   else if(/zone (a|ae|ah|ao)/i.test(fz)){flood=80;factors.push(['FEMA Special Flood Hazard Area','var(--flood)']);}
   else if(/0\.2%|shaded|zone x \(/i.test(fz)){flood=40;factors.push(['0.2% annual (500-yr) flood fringe','var(--yellow)']);}
   else if(/unavailable/i.test(fz)){flood=30;floodKnown=false;}
-  if(live&&live.alerts.some(a=>/flood/i.test(a))){flood=clamp(flood+15);factors.push(['Active NWS flood alert','var(--red)']);}
+  if(live&&live.alerts.some(a=>/flood|tsunami/i.test(a))){flood=clamp(flood+15);factors.push(['Active NWS flood/tsunami alert','var(--red)']);}
+  if(ad&&ad.tsunami===true){ flood=Math.max(flood,88); factors.push(['In CGS Tsunami Hazard Area (coastal inundation)','var(--red)']); }
   flood=clamp(flood);
 
   // ── HAZMAT / INDUSTRIAL ──
@@ -1913,6 +1930,14 @@ function toggleFaults(){
   document.getElementById('ly-faults').classList.toggle('on',showFaults);
   drawFaults();
 }
+function toggleTsunami(){
+  layers.tsunami=!layers.tsunami;
+  document.getElementById('ly-tsunami').classList.toggle('on',layers.tsunami);
+  if(tsunamiLayer){
+    if(layers.tsunami) tsunamiLayer.addTo(mapObj);
+    else if(mapObj.hasLayer(tsunamiLayer)) mapObj.removeLayer(tsunamiLayer);
+  }
+}
 
 function subBar(name,val){
   const c = val>=70?'#ff2d2d':val>=50?'#ff7a00':val>=30?'#ffd000':val>=15?'#00aaff':'#00ff88';
@@ -1939,6 +1964,7 @@ function renderAssess({lat,lon,radKm,facAnalysis,within,insideFootprints,nc,ncD,
     ${subBar('Exposure',s.exposure)}
     <tr><td colspan="2" style="padding-top:10px;color:var(--muted);font-size:8.5px;letter-spacing:1px;">─ SITE DETAIL ─</td></tr>
     <tr><td>FEMA flood zone</td><td class="${floodCol}">${ad.flood||'…'}</td></tr>
+    <tr><td>Tsunami hazard zone</td><td class="${ad.tsunami===true?'c-red':ad.tsunami===false?'c-green':'c-dim'}">${ad.tsunami===true?'YES — in zone':ad.tsunami===false?'No':'…'}</td></tr>
     <tr><td>CAL FIRE hazard</td><td class="${fireCol}">${ad.fire||'…'}</td></tr>
     <tr><td>Nearest fault</td><td class="c-orange">${faultInfo?fmtM(faultInfo.d)+' ('+faultInfo.name+')':'—'}</td></tr>
     <tr><td>Nearest hazmat corridor</td><td class="c-yellow">${isFinite(ncD)?fmtM(ncD):'—'}</td></tr>
@@ -1971,7 +1997,7 @@ function renderAssess({lat,lon,radKm,facAnalysis,within,insideFootprints,nc,ncD,
     ['rgba(255,45,45,.5)','Facility footprint reaches here','','c-red'],
     ['rgba(255,208,0,.6)','School','','c-yellow'],
     ['rgba(0,221,255,.6)','Hospital / clinic','','c-blue'],
-  ])+`<div class="evac-disclaimer" style="border:none">Flood: FEMA · Fire: CAL FIRE · Sites: OpenStreetMap<br>Faults: simplified major CA faults · Weighting: ${riskWeightMode}</div>`;
+  ])+`<div class="evac-disclaimer" style="border:none">Flood: FEMA · Fire: CAL FIRE · Tsunami: CGS · Sites: OpenStreetMap<br>Faults: simplified major CA faults · Weighting: ${riskWeightMode}</div>`;
 }
 
 function renderAssessEmpty(){
@@ -2167,15 +2193,17 @@ function generatePDF(){
   const doc=new jsPDF({unit:'pt',format:'letter'});
   const W=612, M=48; let y=64;
   const accent={chem:[255,45,45],fire:[255,85,0],flood:[34,136,255],rail:[255,208,0],assess:[0,200,180]}[mode];
+  // sanitize text for jsPDF built-in fonts (WinAnsi only — strip symbols it can't render)
+  const P=s=>String(s).replace(/◆/g,'').replace(/[—–]/g,'-').replace(/·/g,'-').replace(/→/g,'to').replace(/°/g,' deg ').replace(/[^\x20-\x7E]/g,'');
 
   doc.setFillColor(12,16,22); doc.rect(0,0,W,84,'F');
   doc.setFillColor(accent[0],accent[1],accent[2]); doc.rect(0,0,W,5,'F');
   doc.setTextColor(accent[0],accent[1],accent[2]); doc.setFont('helvetica','bold'); doc.setFontSize(20);
-  doc.text('OC◆SCANNER',M,44);
+  doc.text('OC SCANNER',M,44);
   doc.setTextColor(150,165,180); doc.setFontSize(9); doc.setFont('helvetica','normal');
   doc.text('CALIFORNIA MULTI-HAZARD THREAT ASSESSMENT',M,62);
   doc.setTextColor(120,130,140); doc.setFontSize(8);
-  doc.text('Generated '+new Date().toLocaleString(),W-M,44,{align:'right'});
+  doc.text('Generated '+P(new Date().toLocaleString()),W-M,44,{align:'right'});
 
   y=120;
   const modeName={chem:'Chemical / Blast',fire:'Wildfire',flood:'Flood / Inundation',rail:'Rail / Hwy Hazmat',assess:'Location Threat Assessment'}[mode];
@@ -2185,10 +2213,10 @@ function generatePDF(){
 
   function row(label,val,color){
     doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(110,110,110);
-    doc.text(label.toUpperCase(),M,y);
+    doc.text(P(label).toUpperCase(),M,y);
     doc.setFont('helvetica','bold'); doc.setFontSize(12);
     if(color) doc.setTextColor(color[0],color[1],color[2]); else doc.setTextColor(20,20,20);
-    doc.text(String(val),W-M,y,{align:'right'});
+    doc.text(P(val),W-M,y,{align:'right'});
     doc.setDrawColor(230,230,230); doc.setLineWidth(0.5); doc.line(M,y+8,W-M,y+8);
     y+=30;
   }
@@ -2196,13 +2224,13 @@ function generatePDF(){
   if(mode==='assess'&&r.latLon){
     const locName=document.getElementById('assessLoc').textContent;
     doc.setFontSize(11); doc.setTextColor(60,60,60); doc.setFont('helvetica','bold');
-    doc.text(locName,M,y); y+=16;
+    doc.text(P(locName),M,y); y+=16;
     doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(120,120,120);
-    doc.text(`${r.latLon.lat.toFixed(5)}°N ${Math.abs(r.latLon.lon).toFixed(5)}°W`,M,y); y+=24;
-    row('Overall Risk',`${r.risk.label} — ${r.risk.overall}/100`,r.risk.color?hexToRgb(r.risk.color):accent);
+    doc.text(`${r.latLon.lat.toFixed(5)}N ${Math.abs(r.latLon.lon).toFixed(5)}W`,M,y); y+=24;
+    row('Overall Risk',`${r.risk.label} - ${r.risk.overall}/100`,r.risk.color?hexToRgb(r.risk.color):accent);
     // sub-score breakdown
     doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(90,90,90);
-    doc.text('SUB-SCORES (0–100)',M,y); y+=16;
+    doc.text('SUB-SCORES (0-100)',M,y); y+=16;
     const subs=[['Wildfire',r.risk.sub.wildfire],['Flood',r.risk.sub.flood],['Hazmat',r.risk.sub.hazmat],['Seismic',r.risk.sub.seismic],['Exposure',r.risk.sub.exposure]];
     subs.forEach(([n,v])=>{
       doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(80,80,80);
@@ -2215,25 +2243,27 @@ function generatePDF(){
       y+=18;
     });
     y+=8;
-    row('FEMA Flood Zone',r.flood||'—');
-    row('CAL FIRE Hazard',r.fire||'—');
-    row('Nearest Fault',r.faultInfo?`${fmtM(r.faultInfo.d)} (${r.faultInfo.name})`:'—');
-    row('Nearest Hazmat Corridor',isFinite(r.ncD)?fmtDist(r.ncD)+' ('+r.nc.name+')':'—');
-    row('Schools / Hospitals Nearby',r.receptors?`${r.receptors.filter(x=>x.type==='school').length} schools · ${r.receptors.filter(x=>x.type!=='school').length} medical`:'not loaded');
+    y+=8;
+    row('FEMA Flood Zone',r.flood||'-');
+    row('Tsunami Hazard Zone',assessData&&assessData.tsunami===true?'YES - in CGS hazard area':assessData&&assessData.tsunami===false?'No':'not queried');
+    row('CAL FIRE Hazard',r.fire||'-');
+    row('Nearest Fault',r.faultInfo?`${fmtM(r.faultInfo.d)} (${r.faultInfo.name})`:'-');
+    row('Nearest Hazmat Corridor',isFinite(r.ncD)?fmtDist(r.ncD)+' ('+r.nc.name+')':'-');
+    row('Schools / Hospitals Nearby',r.receptors?`${r.receptors.filter(x=>x.type==='school').length} schools, ${r.receptors.filter(x=>x.type!=='school').length} medical`:'not loaded');
     row('Facility Footprints Reaching Here',r.insideFootprints.length);
     y+=6;
     doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(40,40,40);
     doc.text('Contributing Risk Factors',M,y); y+=16;
     doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(70,70,70);
-    (r.risk.factors.length?r.risk.factors:[['No significant mapped threats','']]).forEach(([t])=>{ doc.text('•  '+t,M,y); y+=15; });
+    (r.risk.factors.length?r.risk.factors:[['No significant mapped threats','']]).forEach(([t])=>{ doc.text('-  '+P(t),M,y); y+=15; });
     y+=6;
     doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(40,40,40);
     doc.text('Nearby Facilities',M,y); y+=15;
     doc.setFont('helvetica','normal'); doc.setFontSize(8.5); doc.setTextColor(80,80,80);
-    (r.within.slice(0,10)).forEach(x=>{ doc.text(`${x.f.name} — ${x.cat.label} — ${fmtM(x.d)}${x.inside?' — INSIDE '+x.inside:''}`,M,y); y+=13; });
+    (r.within.slice(0,10)).forEach(x=>{ doc.text(P(`${x.f.name} - ${x.cat.label} - ${fmtM(x.d)}${x.inside?' - INSIDE '+x.inside:''}`),M,y); y+=13; });
   } else {
     const sub=document.getElementById('sbChem').textContent;
-    doc.setFontSize(10); doc.setTextColor(80,80,80); doc.text(sub,M,y); y+=24;
+    doc.setFontSize(10); doc.setTextColor(80,80,80); doc.text(P(sub),M,y); y+=24;
     // pull rows from the readout table
     document.querySelectorAll('#readoutTable tr').forEach(tr=>{
       const tds=tr.querySelectorAll('td'); if(tds.length===2) row(tds[0].textContent,tds[1].textContent);
@@ -2243,9 +2273,9 @@ function generatePDF(){
   // footer
   doc.setFillColor(12,16,22); doc.rect(0,742,W,50,'F');
   doc.setTextColor(150,90,90); doc.setFontSize(7.5);
-  doc.text('SIMULATION / PLANNING ESTIMATE — NOT AN OFFICIAL ORDER. Verify with CAL FIRE, OCFA, NWS, and FEMA before operational use.',M,764);
+  doc.text('SIMULATION / PLANNING ESTIMATE - NOT AN OFFICIAL ORDER. Verify with CAL FIRE, OCFA, NWS, and FEMA before operational use.',M,764);
   doc.setTextColor(110,120,130);
-  doc.text('@OC_Scanner · California Multi-Hazard Threat Assessment',M,778);
+  doc.text('@OC_Scanner | California Multi-Hazard Threat Assessment',M,778);
 
   doc.save(`oc-scanner-${mode}-report-${Date.now()}.pdf`);
 }
@@ -2265,6 +2295,7 @@ function buildPostText(){
     t+=`Overall risk: ${r.risk.label} (${r.risk.overall}/100)\n`;
     t+=`🔥 Fire ${s.wildfire} · 🌊 Flood ${s.flood} · 🏭 Hazmat ${s.hazmat} · 🌐 Seismic ${s.seismic}\n\n`;
     t+=`FEMA flood: ${r.flood}\nFire hazard: ${r.fire}\n`;
+    if(assessData&&assessData.tsunami===true) t+=`🌊 IN CGS TSUNAMI HAZARD AREA\n`;
     if(r.faultInfo&&r.faultInfo.d<15000) t+=`Fault: ${fmtM(r.faultInfo.d)} from ${r.faultInfo.name}\n`;
     if(r.insideFootprints.length) t+=`Inside ${r.insideFootprints.length} industrial hazard footprint(s)\n`;
     if(live.alerts.length) t+=`📢 Active NWS: ${live.alerts.join(', ')}\n`;
@@ -2305,7 +2336,10 @@ async function runBatch(){
       // per-point FEMA flood
       let ad={flood:'X',fireClass:null,fire:'Not queried'};
       try{ const fj=await (await fetch(`https://hazards.fema.gov/arcgis/rest/services/public/NFHL/MapServer/28/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=FLD_ZONE,SFHA_TF&returnGeometry=false&f=json`)).json(); if(fj.features&&fj.features.length){ad.flood='Zone '+fj.features[0].attributes.FLD_ZONE;ad.floodSFHA=(fj.features[0].attributes.SFHA_TF==='T');} }catch(e){}
+      // per-point tsunami hazard
+      try{ const tj=await (await fetch(`https://services.gis.ca.gov/arcgis/rest/services/Oceans/Tsunami/MapServer/0/query?geometry=${lon},${lat}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&returnGeometry=false&outFields=Label&f=json`)).json(); ad.tsunami=!!(tj.features&&tj.features.length); }catch(e){}
       const a=assessSilent(lat,lon,windSpd,windDeg,ad);
+      a.tsunami=ad.tsunami;
       batchData.push({addr:lines[i],lat,lon,...a});
       renderBatch();
     }catch(e){ batchData.push({addr:lines[i],err:'Error'}); }
@@ -2344,8 +2378,8 @@ function renderBatch(){
   res.innerHTML=`<table><tr><th>#</th><th>Address</th><th>Overall</th><th>Fire</th><th>Flood</th><th>Haz</th><th>Quake</th><th>FEMA</th></tr>${rows}</table>`;
 }
 function exportBatchCsv(){
-  const hdr='rank,address,lat,lon,overall,risk_label,wildfire,flood,hazmat,seismic,exposure,fema_flood_zone,footprints_inside,nearest_facility,nearest_facility_m,nearest_corridor_m,nearest_fault,nearest_fault_m\n';
-  const rows=batchData.map((b,i)=>b.err?`${i+1},"${b.addr}",,,,ERROR,,,,,,,,,,,,`:`${i+1},"${b.addr}",${b.lat.toFixed(5)},${b.lon.toFixed(5)},${b.overall},${b.label},${b.sub.wildfire},${b.sub.flood},${b.sub.hazmat},${b.sub.seismic},${b.sub.exposure},${b.flood||''},${b.insideCount},"${b.nearestName}",${Math.round(b.nearestD)},${isFinite(b.ncD)?Math.round(b.ncD):''},"${b.faultName}",${Math.round(b.faultD)}`).join('\n');
+  const hdr='rank,address,lat,lon,overall,risk_label,wildfire,flood,hazmat,seismic,exposure,fema_flood_zone,tsunami_zone,footprints_inside,nearest_facility,nearest_facility_m,nearest_corridor_m,nearest_fault,nearest_fault_m\n';
+  const rows=batchData.map((b,i)=>b.err?`${i+1},"${b.addr}",,,,ERROR,,,,,,,,,,,,,`:`${i+1},"${b.addr}",${b.lat.toFixed(5)},${b.lon.toFixed(5)},${b.overall},${b.label},${b.sub.wildfire},${b.sub.flood},${b.sub.hazmat},${b.sub.seismic},${b.sub.exposure},${b.flood||''},${b.tsunami===true?'YES':b.tsunami===false?'no':''},${b.insideCount},"${b.nearestName}",${Math.round(b.nearestD)},${isFinite(b.ncD)?Math.round(b.ncD):''},"${b.faultName}",${Math.round(b.faultD)}`).join('\n');
   const blob=new Blob([hdr+rows],{type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`oc-scanner-batch-${Date.now()}.csv`; a.click();
 }
